@@ -1,0 +1,13 @@
+# Environnement virtuel
+venv/
+
+# Fichiers système
+.DS_Store
+
+# Fichiers compilés Python
+__pycache__/
+*.py[cod]
+
+# Dossiers IDE
+.idea/
+.vscode/
