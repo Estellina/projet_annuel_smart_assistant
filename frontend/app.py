@@ -1,82 +1,143 @@
-import streamlit as st
-import fitz
+from flask import Flask, render_template, request, redirect, url_for, session
+import os
+import sys
 
 
-# --- Titre ---
-st.set_page_config(page_title="Smart Assistant IA", layout="centered")
-st.title(" Smart Assistant IA - Prototype")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- Choix des sources ---
-st.header("1. Choisissez vos sources")
+from backend.modules.transcription import transcribe
+from backend.modules.summarizer import generate_summary
+from backend.modules.quiz_generator import generate_quiz
+#from backend.modules.pdf_extractor import extract_with_grobid, extract_with_fitz, parse_grobid_tei
 
-with st.form("source_form"):
-    pdf_option = st.checkbox(" Envoyer un document PDF")
-    video_option = st.checkbox(" Envoyer une vidéo")
-    live_option = st.checkbox(" Captation en direct")
-    submitted = st.form_submit_button("Valider")
+from backend.modules.rag_pipeline import retrieve_relevant
+from backend.modules.save_json import save_results
+from flask import send_from_directory
+from werkzeug.utils import safe_join
+from backend.modules.pdf_processing import process_pdf, initialize_models
 
-# --- Interface dynamique après validation ---
-if submitted:
-    st.success("Sources validées ")
+app = Flask(__name__)
+app.secret_key = "your_secret_key_here"
 
-    # === PDF ===
-    if pdf_option:
-        st.subheader(" Uploader votre document PDF")
-        uploaded_pdf = st.file_uploader("Choisissez un fichier PDF", type=["pdf"])
+# Dossier des uploads
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-    # === Vidéo ===
-    if video_option:
-        st.subheader(" Uploader votre vidéo")
-        uploaded_video = st.file_uploader("Choisissez une vidéo", type=["mp4", "avi", "mov"])
+# INITIALISATION DU MODÈLE
+initialize_models()
 
-    # === Enregistrement Live (Simulation) ===
-    if live_option:
-        st.subheader(" Captation en direct (simulation)")
-        if st.button(" ▶ Démarrer l'enregistrement"):
-            st.info(" Enregistrement en cours... (simulation uniquement)")
 
-    # === Résumé simulé ===
-    st.header("📝 Résumé généré")
+@app.route("/", methods=["GET"])
+def index():
+    """Page d'accueil."""
+    return render_template("index.html")
 
-    if pdf_option and uploaded_pdf:
-        st.subheader("📖 Contenu du document PDF")
 
-        # Lire le PDF avec PyMuPDF
-        pdf_bytes = uploaded_pdf.read()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        full_text = ""
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    """Upload du fichier, traitement du PDF, génération du résumé et des quiz."""
+    file = request.files.get("file")
+    question = request.form.get("question", "")
 
-        for page in doc:
-            full_text += page.get_text()
+    if file:
+        path = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(path)
 
-        doc.close()
+        # ⚡️ Appel DIRECT à process_pdf
+        with open(path, "rb") as pdf_file:
+            pdf_bytes = pdf_file.read()
+            result = process_pdf(pdf_bytes)
 
-        # Afficher un extrait du texte
-        if full_text.strip():
-            st.text_area("Aperçu du contenu extrait", value=full_text[:1500], height=300)
+        summary = result.get("summary", "")
+        quiz = result.get("quizzes", [])
+
+        if question:
+            chunks = [summary[i:i + 300] for i in range(0, len(summary), 300)]
+            answer = retrieve_relevant(chunks, question)  # À définir si nécessaire
         else:
-            st.warning("Aucun texte lisible n'a été extrait du PDF.")
+            answer = ""
 
-    if video_option and uploaded_video:
-        st.subheader("Résumé de la vidéo")
-        st.write("La vidéo explique les avantages de l'intelligence artificielle dans l'éducation...")
+        # Sauvegarde des résultats
+        save_results({
+            "filename": file.filename,
+            "summary": summary,
+            "question": question,
+            "answer": answer,
+            "quiz": quiz
+        }, output_dir="shared/exports")
 
-    if live_option:
-        st.subheader("Résumé du live")
-        st.write("Le discours en live aborde les tendances 2025 en formation professionnelle...")
+        return render_template("result.html",
+                               summary=summary,
+                               answer=answer,
+                               quiz=quiz,
+                               question=question,
+                               filename=file.filename)
 
-    # === Quiz Simulé ===
-    st.header("QCM Interactif")
+    return redirect(url_for("index"))
 
-    with st.form("quiz_form"):
-        question = st.radio(
-            "Question 1 : Quel est l'avantage principal de l'IA selon la vidéo ?",
-            ("Automatisation", "Personnalisation", "Gain de temps", "Coût élevé")
-        )
-        quiz_submit = st.form_submit_button("Valider ma réponse")
 
-    if quiz_submit:
-        if question == "Personnalisation":
-            st.success(" Bonne réponse !")
-        else:
-            st.warning(" Mauvaise réponse. La bonne réponse était : Personnalisation.")
+@app.route("/generate_quiz", methods=["POST"])
+def generate_quiz_route():
+    """Génération du quiz à partir du résumé."""
+    summary = request.form.get("summary", "")
+    question = request.form.get("question", "")
+    quiz = []  # Ici, tu peux définir ta propre méthode de génération du quiz si nécessaire
+    answer = retrieve_relevant([summary], question) if question else ""
+    return render_template("quiz.html",
+                           summary=summary,
+                           quiz=quiz,
+                           answer=answer,
+                           question=question)
+
+
+@app.route("/submit_quiz", methods=["POST"])
+def submit_quiz():
+    """Récupération des réponses du quiz soumis."""
+    submitted_answers = {
+        key: value for key, value in request.form.items() if key.startswith("question_")
+    }
+    return render_template("qcm.html",
+                           summary=session.get("summary", ""),
+                           quiz=session.get("quiz", []),
+                           answers=submitted_answers)
+
+
+@app.route("/uploads/<path:filename>")
+def uploaded_file(filename):
+    """Accès direct aux fichiers uploadés."""
+    file_path = safe_join(UPLOAD_FOLDER, filename)
+    return send_from_directory(UPLOAD_FOLDER, os.path.basename(file_path))
+
+@app.route("/ask_question", methods=["POST"])
+def ask_question():
+    """Répond à une question à propos du document déjà traité."""
+    filename = request.form.get("filename")
+    question = request.form.get("question", "")
+    if not filename or not question:
+        return redirect(url_for("index"))
+
+    # Chemin du fichier
+    path = os.path.join(UPLOAD_FOLDER, filename)
+
+    if not os.path.exists(path):
+        return redirect(url_for("index"))
+
+    #Relire le fichier pour effectuer le RAG
+    with open(path, "rb") as pdf_file:
+        pdf_bytes = pdf_file.read()
+        result = process_pdf(pdf_bytes)
+
+    summary = result.get("summary", "")
+    chunks = [summary[i:i + 300] for i in range(0, len(summary), 300)]
+    answer = retrieve_relevant(chunks, question)
+
+    return render_template("result.html",
+                           summary=summary,
+                           answer=answer,
+                           quiz=result.get("quizzes", []),
+                           question=question,
+                           filename=filename)
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
