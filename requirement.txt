@@ -1,5 +1,17 @@
-fastapi
-uvicorn
-python-multipart
-streamlit
+flask
 requests
+fastapi
+python-multipart
+PyMuPDF
+whisper
+sentence-transformers
+transformers
+torch
+scikit-learn
+numpy
+pydantic
+openai-whisper
+
+git clone https://github.com/kermitt2/grobid
+cd grobid
+./gradlew run
